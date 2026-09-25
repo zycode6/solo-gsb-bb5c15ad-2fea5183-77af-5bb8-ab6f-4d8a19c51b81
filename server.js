@@ -230,6 +230,93 @@ app.delete('/api/cues/:number', (req, res) => {
   ok(res);
 });
 
+/* ---------- 批量平移提示号 ----------
+ * 输入闭区间 [from, to] 与非零整数位移 shift，区间内每条提示号 n 改为 n + shift。
+ * 校验：区间内至少一条提示；新号均为安全正整数；不与区间外提示号冲突。
+ * 校验通过后在单个事务中改写提示主键与转移的提示号引用，备注、转移内容与组内顺序不变。
+ */
+
+// 共用校验：返回 { moves, conflicts } 或 { err }
+function planShift(body) {
+  const from = Number(body.from);
+  const to = Number(body.to);
+  const shift = Number(body.shift);
+  if (!Number.isSafeInteger(from) || from <= 0) return { err: '起始号必须是正整数' };
+  if (!Number.isSafeInteger(to) || to <= 0) return { err: '结束号必须是正整数' };
+  if (from > to) return { err: `起始号 ${from} 不能大于结束号 ${to}` };
+  if (!Number.isSafeInteger(shift) || shift === 0) return { err: '位移必须是非零整数' };
+
+  const rows = db
+    .prepare('SELECT number, note FROM cues WHERE number BETWEEN ? AND ? ORDER BY number')
+    .all(from, to);
+  if (rows.length === 0) return { err: `区间 [${from}, ${to}] 内没有任何提示，无法平移` };
+
+  const moves = rows.map((r) => ({ from: r.number, to: r.number + shift, note: r.note }));
+  for (const m of moves) {
+    if (!Number.isSafeInteger(m.to) || m.to <= 0)
+      return { err: `提示 ${m.from} 平移后的新号 ${m.to} 不是安全正整数，整批拒绝` };
+  }
+
+  // 新号不得与区间外的提示号冲突（区间内互撞不可能：位移是单射）
+  const marks = moves.map(() => '?').join(',');
+  const conflicts = db
+    .prepare(
+      `SELECT number FROM cues WHERE (number < ? OR number > ?) AND number IN (${marks}) ORDER BY number`
+    )
+    .all(from, to, ...moves.map((m) => m.to))
+    .map((r) => r.number);
+
+  return { moves, conflicts };
+}
+
+// 预览：只列出原号→新号与冲突号，不写库
+app.post('/api/cues/shift/preview', (req, res) => {
+  const plan = planShift(req.body);
+  if (plan.err) return bad(res, plan.err);
+  res.json(plan);
+});
+
+// 执行：校验通过后单事务落库，随后全量重放并返回最新状态
+app.post('/api/cues/shift', (req, res) => {
+  const plan = planShift(req.body);
+  if (plan.err) return bad(res, plan.err);
+  if (plan.conflicts.length)
+    return res.status(409).json({
+      error: `新号与区间外提示冲突：${plan.conflicts.join('、')}，整批已拒绝`,
+      conflicts: plan.conflicts,
+      moves: plan.moves,
+    });
+
+  const from = Number(req.body.from);
+  const to = Number(req.body.to);
+  const shift = Number(req.body.shift);
+
+  const tx = db.transaction(() => {
+    // 先取出区间内提示的完整内容（转移按 id 保序），再删旧行、按新号重写
+    const trStmt = db.prepare(
+      'SELECT prop, from_loc, to_loc FROM transfers WHERE cue_number = ? ORDER BY id'
+    );
+    const cues = db
+      .prepare('SELECT number, note FROM cues WHERE number BETWEEN ? AND ? ORDER BY number')
+      .all(from, to)
+      .map((c) => ({ number: c.number, note: c.note, transfers: trStmt.all(c.number) }));
+
+    db.prepare('DELETE FROM cues WHERE number BETWEEN ? AND ?').run(from, to); // 旧转移级联删除
+
+    const insCue = db.prepare('INSERT INTO cues (number, note) VALUES (?, ?)');
+    const insTr = db.prepare(
+      'INSERT INTO transfers (cue_number, prop, from_loc, to_loc) VALUES (?, ?, ?, ?)'
+    );
+    for (const c of cues) {
+      const newNum = c.number + shift;
+      insCue.run(newNum, c.note);
+      for (const t of c.transfers) insTr.run(newNum, t.prop, t.from_loc, t.to_loc);
+    }
+  });
+  tx();
+  ok(res);
+});
+
 /* ---------- 启动 ---------- */
 
 const PORT = Number(process.env.PORT) || 3000;

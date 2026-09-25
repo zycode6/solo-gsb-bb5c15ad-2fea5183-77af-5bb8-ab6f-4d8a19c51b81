@@ -8,9 +8,10 @@ let editingCue = null; // 正在编辑的提示号，null 表示新增模式
 
 const $ = (sel) => document.querySelector(sel);
 
-function toast(msg) {
+function toast(msg, okStyle) {
   const el = $('#toast');
   el.textContent = msg;
+  el.classList.toggle('ok', !!okStyle);
   el.classList.remove('hidden');
   clearTimeout(toast._t);
   toast._t = setTimeout(() => el.classList.add('hidden'), 3500);
@@ -350,6 +351,115 @@ $('#cue-list').addEventListener('click', (e) => {
   } else if (delNum) {
     if (confirm(`删除提示 ${delNum}？删除后将按提示号重放全部剩余提示。`))
       api(`/api/cues/${delNum}`, 'DELETE').catch(() => {});
+  }
+});
+
+/* ---------- 批量平移提示号 ---------- */
+
+let shiftPlan = null; // 最近一次预览返回的方案（含冲突信息），输入一变即失效
+
+function collectShiftForm() {
+  return {
+    from: Number($('#shift-from').value),
+    to: Number($('#shift-to').value),
+    shift: Number($('#shift-delta').value),
+  };
+}
+
+function clearShiftPreview() {
+  shiftPlan = null;
+  $('#shift-apply').disabled = true;
+  const panel = $('#shift-preview-panel');
+  panel.classList.add('hidden');
+  panel.innerHTML = '';
+}
+
+function renderShiftPlan(data) {
+  shiftPlan = data;
+  const conflictSet = new Set(data.conflicts || []);
+  const rows = data.moves
+    .map((m) => {
+      const hit = conflictSet.has(m.to);
+      return `<li class="${hit ? 'shift-hit' : ''}">
+        <span class="num">${m.from}</span> <span class="arrow">→</span> <span class="num">${m.to}</span>
+        <span class="shift-note">${esc(m.note || '')}</span>
+        ${hit ? '<span class="badge fail">冲突</span>' : ''}
+      </li>`;
+    })
+    .join('');
+  const summary = conflictSet.size
+    ? `<div class="pv-error">新号 ${[...conflictSet].join('、')} 与区间外已有提示冲突，整批不可执行。</div>`
+    : `<p class="hint">共 ${data.moves.length} 条提示，校验通过，可执行平移。</p>`;
+  const panel = $('#shift-preview-panel');
+  panel.innerHTML = `
+    <div class="pv-title">⇄ 平移预览：闭区间每条提示的原号 → 新号（尚未写入数据库）</div>
+    <ul class="shift-list">${rows}</ul>
+    ${summary}`;
+  panel.classList.remove('hidden');
+  $('#shift-apply').disabled = conflictSet.size > 0;
+}
+
+function renderShiftError(msg) {
+  shiftPlan = null;
+  $('#shift-apply').disabled = true;
+  const panel = $('#shift-preview-panel');
+  panel.innerHTML = `<div class="pv-title">⇄ 批量平移提示号</div><div class="pv-error">${esc(msg)}</div>`;
+  panel.classList.remove('hidden');
+}
+
+$('#shift-preview').addEventListener('click', async () => {
+  const btn = $('#shift-preview');
+  clearShiftPreview();
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/cues/shift/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(collectShiftForm()),
+    });
+    const data = await res.json();
+    if (!res.ok) renderShiftError(data.error || '预览失败');
+    else renderShiftPlan(data);
+  } catch (err) {
+    renderShiftError('无法连接服务器');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// 输入一旦改动，旧预览即失效，须重新预览
+$('#shift-form').addEventListener('input', clearShiftPreview);
+
+$('#shift-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!shiftPlan || (shiftPlan.conflicts || []).length) return;
+  const body = collectShiftForm();
+  if (!confirm(`确认将区间 [${body.from}, ${body.to}] 内的 ${shiftPlan.moves.length} 条提示平移 ${body.shift > 0 ? '+' : ''}${body.shift}？`))
+    return;
+  const btn = $('#shift-apply');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/cues/shift', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      // 执行时校验失败（如预览后数据变化）：整批拒绝，标出冲突号
+      if (data.moves) renderShiftPlan(data);
+      else renderShiftError(data.error || '平移被拒绝');
+      toast(data.error || '平移被拒绝');
+      return;
+    }
+    state = data; // 成功：服务端已按新号全量重放，刷新整个页面
+    render();
+    clearShiftPreview();
+    resetCueForm(); // 编辑中的提示号可能已被平移，退出编辑态避免指向旧号
+    $('#shift-from').value = $('#shift-to').value = $('#shift-delta').value = '';
+    toast('平移完成，已按新号全量重放', true);
+  } catch (err) {
+    renderShiftError('无法连接服务器');
   }
 });
 

@@ -69,6 +69,18 @@
     <section class="row">
       <div class="card">
         <h2>④ 提示序列（按提示号重放）</h2>
+        <div class="shift-box">
+          <h3>批量平移提示号</h3>
+          <p class="hint">输入闭区间起止号与非零整数位移，先「预览平移」列出每条提示的原号→新号；校验通过（区间非空、新号均为安全正整数且不与区间外提示号冲突）后方可执行，执行在单个事务中完成并全量重放。</p>
+          <form id="shift-form" class="inline-form">
+            <label>起始号 <input id="shift-from" type="number" min="1" step="1" required /></label>
+            <label>结束号 <input id="shift-to" type="number" min="1" step="1" required /></label>
+            <label>位移 <input id="shift-delta" type="number" step="1" placeholder="非零整数" required /></label>
+            <button type="button" id="shift-preview" class="ghost">预览平移</button>
+            <button type="submit" id="shift-apply" class="danger" disabled>执行平移</button>
+          </form>
+          <div id="shift-preview-panel" class="preview-panel hidden"></div>
+        </div>
         <div id="cue-list"></div>
       </div>
       <div class="card">
