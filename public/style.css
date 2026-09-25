@@ -180,6 +180,21 @@ button.link { background: none; border: none; color: var(--accent2); padding: 2p
   font-size: 14px;
   background: rgba(224, 92, 106, .08);
 }
+
+/* 批量平移提示号 */
+.shift-table { margin: 4px 0 0; }
+.shift-table td strong { color: var(--accent); }
+.shift-conflicts { margin-top: 10px; font-size: 13px; color: var(--muted); }
+.chip.conflict {
+  display: inline-block;
+  background: rgba(224, 92, 106, .12);
+  border: 1px solid var(--err);
+  color: var(--err);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 13px;
+  margin: 2px 4px 2px 0;
+}
 button:disabled { opacity: .55; cursor: wait; }
 
 #toast {

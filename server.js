@@ -230,6 +230,100 @@ app.delete('/api/cues/:number', (req, res) => {
   ok(res);
 });
 
+/* ---------- 批量平移提示号 ----------
+ * 把闭区间 [from, to] 内所有提示号统一加上非零整数位移 offset。
+ * 校验（任一不满足则整批拒绝，不写库）：
+ *  - 区间内至少有一条提示；
+ *  - 每个新号都是安全正整数；
+ *  - 新号不与区间外已有提示号冲突（冲突时在响应里逐个标出）。
+ * 校验通过后在单个事务内同时改写 cues 主键与 transfers 的提示号引用，
+ * 备注、转移内容与组内顺序（transfers.id 自增序）均不变。
+ */
+function planShift(fromRaw, toRaw, offsetRaw) {
+  const from = Number(fromRaw);
+  const to = Number(toRaw);
+  const offset = Number(offsetRaw);
+  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from <= 0 || to <= 0)
+    return { err: '起止号必须是正整数', code: 400 };
+  if (from > to) return { err: `起始号 ${from} 不能大于截止号 ${to}`, code: 400 };
+  if (!Number.isSafeInteger(offset) || offset === 0)
+    return { err: '位移必须是非零整数（安全整数范围内）', code: 400 };
+
+  const inRange = db
+    .prepare('SELECT number, note FROM cues WHERE number BETWEEN ? AND ? ORDER BY number')
+    .all(from, to);
+  if (inRange.length === 0)
+    return { err: `区间 [${from}, ${to}] 内没有任何提示，整批拒绝`, code: 400 };
+
+  const mapping = inRange.map((c) => ({ from: c.number, to: c.number + offset, note: c.note }));
+
+  // 新号必须都是安全正整数（JS 可精确表示，且落库后仍是合法提示号）
+  const invalid = mapping.filter((m) => !Number.isSafeInteger(m.to) || m.to <= 0);
+  if (invalid.length)
+    return {
+      err: `平移后的新号必须是安全的正整数，以下不合法：${invalid
+        .map((m) => `${m.from}→${m.to}`)
+        .join('、')}，整批拒绝`,
+      code: 400,
+      invalid: invalid.map((m) => m.from),
+    };
+
+  // 区间内的新号彼此必然不同（整体加同一偏移），只需检查与区间外提示号的冲突
+  const newSet = new Set(mapping.map((m) => m.to));
+  const conflicts = db
+    .prepare('SELECT number FROM cues WHERE number < ? OR number > ? ORDER BY number')
+    .all(from, to)
+    .map((r) => r.number)
+    .filter((n) => newSet.has(n));
+  if (conflicts.length)
+    return {
+      err: `新号与区间外提示号冲突：${conflicts.join('、')}，整批拒绝`,
+      code: 409,
+      conflicts,
+    };
+
+  return { mapping, offset };
+}
+
+function shiftError(res, plan) {
+  res.status(plan.code).json({
+    error: plan.err,
+    conflicts: plan.conflicts || [],
+    invalid: plan.invalid || [],
+  });
+}
+
+// 试算平移计划（不写库）：列出区间内每条提示的原号→新号
+app.post('/api/cues/shift/preview', (req, res) => {
+  const plan = planShift(req.body.from, req.body.to, req.body.offset);
+  if (plan.err) return shiftError(res, plan);
+  res.json({ mapping: plan.mapping });
+});
+
+// 执行平移：单事务改写主键与引用，成功后按新号全量重放并返回最新状态
+app.post('/api/cues/shift', (req, res) => {
+  const plan = planShift(req.body.from, req.body.to, req.body.offset);
+  if (plan.err) return shiftError(res, plan);
+
+  const tx = db.transaction(() => {
+    // 外键校验延迟到事务提交：允许先改 cues 主键、再改 transfers 引用
+    db.pragma('defer_foreign_keys = ON');
+    const upCue = db.prepare('UPDATE cues SET number = ? WHERE number = ?');
+    const upTr = db.prepare('UPDATE transfers SET cue_number = ? WHERE cue_number = ?');
+    // 正位移从大到小、负位移从小到大改写，避免改写途中撞上尚未移动的提示号
+    const ordered = [...plan.mapping].sort((a, b) =>
+      plan.offset > 0 ? b.from - a.from : a.from - b.from
+    );
+    for (const m of ordered) {
+      upCue.run(m.to, m.from);
+      upTr.run(m.to, m.from);
+    }
+  });
+  tx();
+
+  res.json({ ...loadState(), shifted: plan.mapping });
+});
+
 /* ---------- 启动 ---------- */
 
 const PORT = Number(process.env.PORT) || 3000;

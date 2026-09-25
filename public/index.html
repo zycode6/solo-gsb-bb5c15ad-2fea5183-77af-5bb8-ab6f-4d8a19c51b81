@@ -65,14 +65,30 @@
       </div>
     </section>
 
-    <!-- 三、提示列表 + 重放结果 -->
+    <!-- 三、批量平移提示号 -->
+    <section class="row">
+      <div class="card wide">
+        <h2>④ 批量平移提示号</h2>
+        <p class="hint">把闭区间 [起始号, 截止号] 内的所有提示号统一加上一个非零整数位移。执行时校验：区间内至少一条提示、新号均为安全正整数、不与区间外提示号冲突——任一不满足则整批拒绝并标出冲突号；校验通过后在单个事务内改写全部号码，备注、转移内容与组内顺序保持不变。</p>
+        <form id="shift-form" class="inline-form">
+          <label>起始号 <input id="shift-from" type="number" min="1" step="1" required /></label>
+          <label>截止号 <input id="shift-to" type="number" min="1" step="1" required /></label>
+          <label>位移 <input id="shift-offset" type="number" step="1" placeholder="非零整数" required /></label>
+          <button type="submit" class="ghost">列出平移计划</button>
+          <button type="button" id="shift-run" class="danger" disabled>执行平移</button>
+        </form>
+        <div id="shift-panel" class="preview-panel hidden"></div>
+      </div>
+    </section>
+
+    <!-- 四、提示列表 + 重放结果 -->
     <section class="row">
       <div class="card">
-        <h2>④ 提示序列（按提示号重放）</h2>
+        <h2>⑤ 提示序列（按提示号重放）</h2>
         <div id="cue-list"></div>
       </div>
       <div class="card">
-        <h2>⑤ 重放结果与最终区位</h2>
+        <h2>⑥ 重放结果与最终区位</h2>
         <div id="replay-results"></div>
         <h3>最终区位</h3>
         <div id="final-board" class="board"></div>

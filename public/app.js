@@ -25,10 +25,13 @@ async function api(path, method = 'GET', body) {
   const data = await res.json();
   if (!res.ok) {
     toast(data.error || '操作失败');
-    throw new Error(data.error || '操作失败');
+    const err = new Error(data.error || '操作失败');
+    err.data = data; // 携带完整响应（如批量平移的冲突号列表）
+    throw err;
   }
   state = data; // 所有变更接口都返回最新全量状态
   render();
+  return data;
 }
 
 function esc(s) {
@@ -350,6 +353,106 @@ $('#cue-list').addEventListener('click', (e) => {
   } else if (delNum) {
     if (confirm(`删除提示 ${delNum}？删除后将按提示号重放全部剩余提示。`))
       api(`/api/cues/${delNum}`, 'DELETE').catch(() => {});
+  }
+});
+
+/* ---------- 批量平移提示号 ---------- */
+
+let shiftPlan = null; // 最近一次「列出平移计划」通过的映射，执行时以此为准
+
+function collectShiftForm() {
+  return {
+    from: Number($('#shift-from').value),
+    to: Number($('#shift-to').value),
+    offset: Number($('#shift-offset').value),
+  };
+}
+
+function shiftPanel(html) {
+  const panel = $('#shift-panel');
+  panel.innerHTML = html;
+  panel.classList.remove('hidden');
+}
+
+function shiftErrorHtml(title, data) {
+  const conflicts = (data && data.conflicts) || [];
+  const invalid = (data && data.invalid) || [];
+  const conflictChips = conflicts.length
+    ? `<div class="shift-conflicts">冲突号（与区间外提示相撞）：${conflicts
+        .map((n) => `<span class="chip conflict">${n}</span>`)
+        .join('')}</div>`
+    : '';
+  const invalidChips = invalid.length
+    ? `<div class="shift-conflicts">不合法的原提示号（新号非安全正整数）：${invalid
+        .map((n) => `<span class="chip conflict">${n}</span>`)
+        .join('')}</div>`
+    : '';
+  return `<div class="pv-title">↔ 批量平移提示号 · ${title}</div>
+    <div class="pv-error">${esc((data && data.error) || '操作失败')}</div>
+    ${conflictChips}${invalidChips}`;
+}
+
+function shiftMappingTable(mapping) {
+  return `<table class="table shift-table">
+    <thead><tr><th>原号</th><th></th><th>新号</th><th>备注</th></tr></thead>
+    <tbody>${mapping
+      .map(
+        (m) => `<tr>
+          <td>${m.from}</td>
+          <td><span class="arrow">→</span></td>
+          <td><strong>${m.to}</strong></td>
+          <td>${esc(m.note || '')}</td>
+        </tr>`
+      )
+      .join('')}</tbody>
+  </table>`;
+}
+
+// 列出平移计划（不写库）
+$('#shift-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  shiftPlan = null;
+  $('#shift-run').disabled = true;
+  try {
+    const res = await fetch('/api/cues/shift/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(collectShiftForm()),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      shiftPanel(shiftErrorHtml('整批拒绝', data));
+      return;
+    }
+    shiftPlan = data.mapping;
+    $('#shift-run').disabled = false;
+    shiftPanel(`<div class="pv-title">↔ 平移计划（${data.mapping.length} 条提示，确认后点「执行平移」）</div>
+      ${shiftMappingTable(data.mapping)}`);
+  } catch (err) {
+    shiftPanel(shiftErrorHtml('无法连接服务器', null));
+  }
+});
+
+// 表单改动后旧计划失效，需重新「列出平移计划」
+$('#shift-form').addEventListener('input', () => {
+  shiftPlan = null;
+  $('#shift-run').disabled = true;
+});
+
+// 执行平移：单事务落库，成功后按新号全量重放并刷新页面
+$('#shift-run').addEventListener('click', async () => {
+  if (!shiftPlan) return;
+  if (!confirm(`确认将区间内 ${shiftPlan.length} 条提示整体平移？`)) return;
+  try {
+    const data = await api('/api/cues/shift', 'POST', collectShiftForm());
+    toast(`已平移 ${data.shifted.length} 条提示，并按新号完成全量重放`);
+    shiftPanel(`<div class="pv-title">↔ 已执行平移（${data.shifted.length} 条提示）</div>
+      ${shiftMappingTable(data.shifted)}`);
+    shiftPlan = null;
+    $('#shift-run').disabled = true;
+    resetCueForm(); // 编辑中的提示号可能已被改写，回到新增模式
+  } catch (err) {
+    shiftPanel(shiftErrorHtml('整批拒绝', (err && err.data) || { error: err.message }));
   }
 });
 
